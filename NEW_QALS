@@ -1,0 +1,126 @@
+REPORT zmaterial_rep.
+ 
+TYPES: BEGIN OF ty_final,
+         matnr              TYPE mseg-matnr,
+         werks              TYPE werks_d,
+         charg              TYPE mseg-charg,
+         lgort              TYPE mseg-lgort,
+         bwart              TYPE mseg-bwart,      " Movement Type from MSEG
+         qlty_hold          TYPE qlmenge04f,      " From QALS LMENGE04
+         blocked            TYPE qlmenge04f,      " From QALS LMENGE04
+         quality_inspection TYPE qals-losmenge,   " From QALS LOSMENGE
+         unrestricted       TYPE qlmenge01f,      " From QALS LMENGE01 / LMENGE01F
+         uom                TYPE qals-mengeneinh, " From QALS MENGENEINH
+       END OF ty_final.
+ 
+DATA: lt_final TYPE TABLE OF ty_final,
+      ls_final TYPE ty_final.
+ 
+DATA: lv_matnr TYPE mseg-matnr,
+      lv_werks TYPE mseg-werks,
+      lv_charg TYPE mseg-charg,
+      lv_lgort TYPE mseg-lgort.
+ 
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-000.
+  SELECT-OPTIONS: s_matnr FOR lv_matnr,
+                  s_werks FOR lv_werks OBLIGATORY,
+                  s_charg FOR lv_charg,
+                  s_lgort FOR lv_lgort.
+SELECTION-SCREEN END OF BLOCK b1.
+ 
+START-OF-SELECTION.
+ 
+* Get Material Descriptions
+SELECT matnr
+  FROM makt
+  INTO TABLE @DATA(lt_makt)
+  WHERE matnr IN @s_matnr.
+ 
+IF lt_makt IS INITIAL.
+  MESSAGE 'No materials found' TYPE 'I'.
+  EXIT.
+ENDIF.
+ 
+* Get MSEG Data including movement type
+SELECT matnr, werks, mblnr, charg, bwart, lgort
+  FROM mseg
+  INTO TABLE @DATA(lt_mseg)
+  FOR ALL ENTRIES IN @lt_makt
+  WHERE matnr = @lt_makt-matnr
+    AND werks IN @s_werks
+    AND charg IN @s_charg
+    AND lgort IN @s_lgort.
+ 
+IF lt_mseg IS INITIAL.
+  MESSAGE 'No MSEG data found' TYPE 'I'.
+  EXIT.
+ENDIF.
+ 
+* Get Stock / Quality Data from QALS
+SELECT prueflos, losmenge, mengeneinh, mblnr, lmenge01, lmenge04
+  FROM qals
+  INTO TABLE @DATA(lt_qals)
+  FOR ALL ENTRIES IN @lt_mseg
+  WHERE mblnr = @lt_mseg-mblnr
+    AND charg IN @s_charg.
+ 
+* Build Final Table
+LOOP AT lt_mseg INTO DATA(ls_mseg).
+ 
+  CLEAR ls_final.
+ 
+  ls_final-matnr = ls_mseg-matnr.
+  ls_final-werks = ls_mseg-werks.
+  ls_final-charg = ls_mseg-charg.
+  ls_final-lgort = ls_mseg-lgort.
+  ls_final-bwart = ls_mseg-bwart.  " Movement Type mapped
+ 
+  * Read QALS for stock and quality values
+  READ TABLE lt_qals INTO DATA(ls_qals)
+       WITH KEY mblnr = ls_mseg-mblnr.
+ 
+  IF sy-subrc = 0.
+    ls_final-uom          = ls_qals-mengeneinh.
+    ls_final-unrestricted = ls_qals-lmenge01.
+    ls_final-quality_inspection = ls_qals-losmenge.
+ 
+    * Quality Hold & Blocked logic from LMENGE04
+    CASE ls_mseg-bwart.
+      WHEN 'QH'.  " Example Movement Type for Quality Hold
+        ls_final-qlty_hold = ls_qals-lmenge04.
+      WHEN 'BL'.  " Example Movement Type for Blocked
+        ls_final-blocked   = ls_qals-lmenge04.
+      WHEN OTHERS.
+        ls_final-quality_inspection = ls_qals-losmenge.
+    ENDCASE.
+  ENDIF.
+ 
+  APPEND ls_final TO lt_final.
+ 
+ENDLOOP.
+ 
+* Display ALV
+IF lt_final IS NOT INITIAL.
+  TRY.
+      cl_salv_table=>factory(
+        IMPORTING r_salv_table = DATA(lo_alv)
+        CHANGING  t_table      = lt_final ).
+ 
+      lo_alv->get_functions( )->set_all( abap_true ).
+      lo_alv->get_columns( )->set_optimize( abap_true ).
+ 
+      lo_alv->get_columns( )->get_column( 'QLTY_HOLD' )->set_long_text( 'Quality On Hold' ).
+      lo_alv->get_columns( )->get_column( 'UNRESTRICTED' )->set_long_text( 'Unrestricted Stock' ).
+      lo_alv->get_columns( )->get_column( 'BLOCKED' )->set_long_text( 'Blocked Stock' ).
+      lo_alv->get_columns( )->get_column( 'QUALITY_INSPECTION' )->set_long_text( 'Stock in Inspection' ).
+      lo_alv->get_columns( )->get_column( 'UOM' )->set_medium_text( 'Unit' ).
+ 
+      lo_alv->display( ).
+ 
+    CATCH cx_salv_msg INTO DATA(lx_msg).
+      MESSAGE lx_msg->get_text( ) TYPE 'E'.
+  ENDTRY.
+ELSE.
+  MESSAGE 'No data found for selection criteria' TYPE 'I'.
+ENDIF.
+ 
